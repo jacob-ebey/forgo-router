@@ -1,4 +1,5 @@
-import { rerender, ForgoRenderArgs, ForgoNode, ForgoElementArg } from "forgo";
+import { rerender, ForgoRenderArgs, ForgoNode } from "forgo";
+import type { JSX } from "forgo/jsx-runtime";
 
 /*
   To be called when the url needs to be changed.
@@ -28,7 +29,17 @@ export function updateRoute() {
     ...routerRenderArgs.element,
     componentIndex: routerRenderArgs.element.componentIndex - 1,
   };
-  rerender(elem);
+
+  // TODO: Figure out why this doesn't fallback to error boundaries in the component tree.
+  try {
+    rerender(elem);
+  } catch (error) {
+    if (error?.then) {
+      (error as Promise<void>).then(() => rerender(elem));
+    } else {
+      throw error;
+    }
+  }
 }
 
 export type RouterProps = {
@@ -46,7 +57,7 @@ export function Router(props: RouterProps) {
   };
 }
 
-export type LinkProps = {
+export type LinkProps = JSX.HTMLAttributes<HTMLAnchorElement> & {
   key?: any;
   href: string;
   children?: ForgoNode | ForgoNode[];
@@ -58,13 +69,7 @@ export function Link(props: LinkProps) {
   return {
     render(props: LinkProps) {
       return (
-        <a
-          key={props.key}
-          style={props.style}
-          onclick={createClickHandler(props.href)}
-          href={props.href}
-          className={props.className}
-        >
+        <a {...props} onclick={createClickHandler(props.href)}>
           {props.children}
         </a>
       );
@@ -79,8 +84,10 @@ export function Link(props: LinkProps) {
 function createClickHandler(url: string) {
   return (ev: MouseEvent) => {
     window.history.pushState({}, "", url);
-    updateRoute();
     ev.preventDefault();
+    updateRoute();
+
+    window.scrollTo({ top: 0, left: 0 });
   };
 }
 
@@ -94,88 +101,108 @@ export type MatchResult = {
   remainingPath: string;
 };
 
-export function matchExactUrl(
-  pattern: string,
-  fn: (match: MatchResult) => ForgoNode
-): ForgoNode | false {
-  const result = match(pattern, { exact: true });
-  return result === false ? false : fn(result);
-}
-
-export function matchUrl(
-  pattern: string,
-  fn: (match: MatchResult) => ForgoNode
-): ForgoNode | false {
-  const result = match(pattern, { exact: false });
-  return result === false ? false : fn(result);
-}
-
 export type MatchOptions = {
   exact: boolean;
 };
 
-export function match(
-  pattern: string,
-  options: MatchOptions = { exact: true }
-): MatchResult | false {
-  const url = window.location.href;
+export type Matcher = {
+  match(pattern: string, options: MatchOptions): MatchResult | false;
+  matchUrl(
+    pattern: string,
+    fn: (match: MatchResult) => ForgoNode
+  ): ForgoNode | false;
+  matchExactUrl(
+    pattern: string,
+    fn: (match: MatchResult) => ForgoNode
+  ): ForgoNode | false;
+};
 
-  const lcaseUrl = url.toLowerCase();
+export function createMatcher(window: Window) {
+  function matchExactUrl(
+    pattern: string,
+    fn: (match: MatchResult) => ForgoNode
+  ): ForgoNode | false {
+    const result = match(pattern, { exact: true });
+    return result === false ? false : fn(result);
+  }
 
-  const fixedUrl = ["http://", "https://"].some((prefix) =>
-    lcaseUrl.startsWith(prefix)
-  )
-    ? lcaseUrl
-    : `${
-        typeof window === "undefined"
-          ? "http://localhost"
-          : `${window.location.protocol}//${window.location.hostname}`
-      }${lcaseUrl.startsWith("/") ? lcaseUrl : `/${lcaseUrl}`}`;
+  function matchUrl(
+    pattern: string,
+    fn: (match: MatchResult) => ForgoNode
+  ): ForgoNode | false {
+    const result = match(pattern, { exact: false });
+    return result === false ? false : fn(result);
+  }
 
-  const urlObject = new URL(fixedUrl);
+  function match(
+    pattern: string,
+    options: MatchOptions = { exact: true }
+  ): MatchResult | false {
+    const url = window.location.href;
 
-  const pathnameParts = urlObject.pathname
-    .split("/")
-    .slice(1, urlObject.pathname.endsWith("/") ? -1 : undefined);
+    const lcaseUrl = url.toLowerCase();
 
-  const patternParts = pattern
-    .toLowerCase()
-    .split("/")
-    .slice(1, pattern.endsWith("/") ? -1 : undefined);
+    const fixedUrl = ["http://", "https://"].some((prefix) =>
+      lcaseUrl.startsWith(prefix)
+    )
+      ? lcaseUrl
+      : `${
+          typeof window === "undefined"
+            ? "http://localhost"
+            : `${window.location.protocol}//${window.location.hostname}`
+        }${lcaseUrl.startsWith("/") ? lcaseUrl : `/${lcaseUrl}`}`;
 
-  if (
-    pathnameParts.length < patternParts.length ||
-    (options.exact && pathnameParts.length !== patternParts.length)
-  ) {
-    return false;
-  } else {
-    const match: MatchResult = {
-      params: {},
-      matchedPath: "",
-      remainingPath: urlObject.pathname,
-    };
+    const urlObject = new URL(fixedUrl);
 
-    for (let i = 0; i < patternParts.length; i++) {
-      const patternPart = patternParts[i];
-      const pathnamePart = pathnameParts[i];
+    const pathnameParts = urlObject.pathname
+      .split("/")
+      .slice(1, urlObject.pathname.endsWith("/") ? -1 : undefined);
 
-      if (patternPart.startsWith(":")) {
-        const paramName = patternPart.substring(1);
-        match.params[paramName] = pathnamePart;
-        match.matchedPath += `/${pathnamePart}`;
-      } else {
-        if (patternPart === pathnamePart) {
+    const patternParts = pattern
+      .toLowerCase()
+      .split("/")
+      .slice(1, pattern.endsWith("/") ? -1 : undefined);
+
+    if (
+      pathnameParts.length < patternParts.length ||
+      (options.exact && pathnameParts.length !== patternParts.length)
+    ) {
+      return false;
+    } else {
+      const match: MatchResult = {
+        params: {},
+        matchedPath: "",
+        remainingPath: urlObject.pathname,
+      };
+
+      for (let i = 0; i < patternParts.length; i++) {
+        const patternPart = patternParts[i];
+        const pathnamePart = pathnameParts[i];
+
+        if (patternPart.startsWith(":")) {
+          const paramName = patternPart.substring(1);
+          match.params[paramName] = pathnamePart;
           match.matchedPath += `/${pathnamePart}`;
         } else {
-          return false;
+          if (patternPart === pathnamePart) {
+            match.matchedPath += `/${pathnamePart}`;
+          } else {
+            return false;
+          }
         }
       }
+
+      match.remainingPath = `/${pathnameParts
+        .slice(patternParts.length)
+        .join("/")}`;
+
+      return match;
     }
-
-    match.remainingPath = `/${pathnameParts
-      .slice(patternParts.length)
-      .join("/")}`;
-
-    return match;
   }
+
+  return {
+    matchExactUrl,
+    matchUrl,
+    match,
+  };
 }
